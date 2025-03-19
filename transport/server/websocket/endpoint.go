@@ -1,4 +1,5 @@
 package websocket
+// 这是一个简单测试修改
 
 import (
 	"net/http"
