@@ -1,7 +1,9 @@
 package websocket
 
 import (
+	"maps"
 	"net/http"
+	"sync"
 
 	"github.com/gorilla/websocket"
 	"github.com/vkviyu/nexus/transport/auth"
@@ -70,12 +72,28 @@ type ConnId = string
 // EndpointPath represents the path of a WebSocket endpoint.
 type EndpointPath = string
 
-type MsgChan = chan *Message
+type MsgChan = chan *EndpointMessage
 
-type ConnMap = map[ConnId]*WebSocketConn
+// SafeConn wraps WebSocketConn with a mutex to ensure write safety.
+// gorilla/websocket connections support one concurrent reader and one concurrent writer,
+// so we need to serialize write operations.
+type SafeConn struct {
+	*WebSocketConn
+	writeMu sync.Mutex
+}
+
+// SafeWriteMessage writes a message to the connection with mutex protection.
+func (sc *SafeConn) SafeWriteMessage(messageType int, data []byte) error {
+	sc.writeMu.Lock()
+	defer sc.writeMu.Unlock()
+	return sc.WriteMessage(messageType, data)
+}
+
+type ConnMap = map[ConnId]*SafeConn
 
 type UpgraderFunc func(w http.ResponseWriter, r *http.Request) (*WebSocketConn, error)
 type UpgradeFailFunc func(rw http.ResponseWriter, r *http.Request)
+type ReadErrorFunc func(err error)
 
 type Endpoint struct {
 	EndpointPath    EndpointPath
@@ -84,7 +102,9 @@ type Endpoint struct {
 	MsgChan         MsgChan
 	UpgradeFunc     UpgraderFunc
 	UpgradeFailFunc UpgradeFailFunc
-	ConnMap         map[ConnId]*WebSocketConn
+	ReadErrorFunc   ReadErrorFunc
+	ConnMap         map[ConnId]*SafeConn
+	connMu          sync.RWMutex
 }
 
 func NewEndpoint(path EndpointPath, options ...EndpointOption) *Endpoint {
@@ -128,6 +148,12 @@ func WithUpgradeFailFunc(upgradeFailFunc UpgradeFailFunc) EndpointOption {
 	}
 }
 
+func WithReadErrorFunc(readErrorFunc ReadErrorFunc) EndpointOption {
+	return func(e *Endpoint) {
+		e.ReadErrorFunc = readErrorFunc
+	}
+}
+
 func WithMsgChan(msgChan MsgChan) EndpointOption {
 	return func(e *Endpoint) {
 		e.MsgChan = msgChan
@@ -153,11 +179,14 @@ func (e *Endpoint) applyDefaultsIfNil() {
 	if e.UpgradeFailFunc == nil {
 		e.UpgradeFailFunc = DefaultUpgradeFailFunc
 	}
+	if e.ReadErrorFunc == nil {
+		e.ReadErrorFunc = DefaultReadErrorFunc
+	}
 	if e.MsgChan == nil {
 		e.MsgChan = make(MsgChan)
 	}
 	if e.ConnMap == nil {
-		e.ConnMap = make(map[ConnId]*WebSocketConn)
+		e.ConnMap = make(map[ConnId]*SafeConn)
 	}
 }
 
@@ -172,26 +201,36 @@ func (e *Endpoint) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		e.UpgradeFailFunc(rw, r)
 		return
 	}
-	e.ConnMap[connId] = conn
+	safeConn := &SafeConn{WebSocketConn: conn}
+	e.connMu.Lock()
+	e.ConnMap[connId] = safeConn
+	e.connMu.Unlock()
 	defer func() {
+		e.connMu.Lock()
 		delete(e.ConnMap, connId)
+		e.connMu.Unlock()
 		conn.Close()
 	}()
 	for {
 		messageType, message, err := conn.ReadMessage()
 		if err != nil {
+			e.ReadErrorFunc(err)
 			return
 		}
-		e.MsgChan <- &Message{
-			MessageType:  MessageType(messageType),
-			Message:      message,
+		e.MsgChan <- &EndpointMessage{
+			Message: Message{
+				MessageType: MessageType(messageType),
+				Message:     message,
+				ConnIds:     []ConnId{connId},
+			},
 			EndpointPath: e.EndpointPath,
-			ConnId:       connId,
 		}
 	}
 }
 
-func (e *Endpoint) GetConn(connId ConnId) *WebSocketConn {
+func (e *Endpoint) GetConn(connId ConnId) *SafeConn {
+	e.connMu.RLock()
+	defer e.connMu.RUnlock()
 	if conn, ok := e.ConnMap[connId]; ok {
 		return conn
 	}
@@ -199,6 +238,8 @@ func (e *Endpoint) GetConn(connId ConnId) *WebSocketConn {
 }
 
 func (e *Endpoint) GetConnCount() int {
+	e.connMu.RLock()
+	defer e.connMu.RUnlock()
 	return len(e.ConnMap)
 }
 
@@ -206,14 +247,22 @@ func (e *Endpoint) GetMsgChan() MsgChan {
 	return e.MsgChan
 }
 
-func (e *Endpoint) SendMessage(msg *EndpointMessage) error {
-	ensureValidEndpointMessage(msg)
+func (e *Endpoint) SendMessage(msg *Message) error {
+	ensureValidMessage(msg)
 	var errs []error
 	if len(msg.ConnIds) == 0 {
-		// 直接对所有连接发送
-		errs = writeMessageForConns(e.ConnMap, msg.MessageType, msg.Message)
+		// 广播到端点所有连接
+		e.connMu.RLock()
+		connMapCopy := make(map[ConnId]*SafeConn, len(e.ConnMap))
+		maps.Copy(connMapCopy, e.ConnMap)
+		e.connMu.RUnlock()
+		for _, conn := range connMapCopy {
+			if err := conn.SafeWriteMessage(int(msg.MessageType), msg.Message); err != nil {
+				errs = append(errs, err)
+			}
+		}
 	} else {
-		// 仅对指定的连接发送
+		// 发送到指定的连接
 		for _, connId := range msg.ConnIds {
 			conn := e.GetConn(connId)
 			if conn == nil {
@@ -223,13 +272,13 @@ func (e *Endpoint) SendMessage(msg *EndpointMessage) error {
 				})
 				continue
 			}
-			if err := conn.WriteMessage(int(msg.MessageType), msg.Message); err != nil {
+			if err := conn.SafeWriteMessage(int(msg.MessageType), msg.Message); err != nil {
 				errs = append(errs, err)
 			}
 		}
 	}
 	if len(errs) > 0 {
-		return &EndpointMessageError{
+		return &MessageSendError{
 			EndpointPath: e.EndpointPath,
 			Errors:       errs,
 		}
@@ -243,4 +292,8 @@ func DefaultUpgradeFunc(w http.ResponseWriter, r *http.Request) (*WebSocketConn,
 
 func DefaultUpgradeFailFunc(rw http.ResponseWriter, r *http.Request) {
 	http.Error(rw, "Failed to upgrade to WebSocket", http.StatusInternalServerError)
+}
+
+func DefaultReadErrorFunc(err error) {
+	// Do nothing by default
 }

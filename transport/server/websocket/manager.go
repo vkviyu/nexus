@@ -7,7 +7,7 @@ type Manager struct {
 	EndpointMap EndpointMap
 }
 
-func NewEndpointMap() EndpointMap {
+func newEndpointMap() EndpointMap {
 	return make(EndpointMap)
 }
 
@@ -17,7 +17,7 @@ func (m EndpointMap) Add(endpointPath EndpointPath, endpoint *Endpoint) {
 
 func NewManager() *Manager {
 	return &Manager{
-		EndpointMap: NewEndpointMap(),
+		EndpointMap: newEndpointMap(),
 	}
 }
 
@@ -25,15 +25,11 @@ func (s *Manager) AddEndpoint(endpoint *Endpoint) {
 	s.EndpointMap.Add(endpoint.EndpointPath, endpoint)
 }
 
-func (s *Manager) SendMessage(msg Sendable) error {
-	return msg.Send(s)
-}
-
 func (s *Manager) GetEndpoint(endpointPath EndpointPath) *Endpoint {
 	return s.EndpointMap[endpointPath]
 }
 
-func (s *Manager) GetConn(endpointPath EndpointPath, connId ConnId) *WebSocketConn {
+func (s *Manager) GetConn(endpointPath EndpointPath, connId ConnId) *SafeConn {
 	endpoint := s.GetEndpoint(endpointPath)
 	if endpoint != nil {
 		return endpoint.GetConn(connId)
