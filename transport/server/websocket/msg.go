@@ -43,10 +43,3 @@ func ensureValidMessage(msg *Message) {
 		msg.MessageType = DefaultMessageType
 	}
 }
-
-// ensureValidEndpointMessage sets default message type if not specified.
-func ensureValidEndpointMessage(msg *EndpointMessage) {
-	if msg.MessageType == 0 {
-		msg.MessageType = DefaultMessageType
-	}
-}

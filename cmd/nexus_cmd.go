@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,66 +10,38 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"github.com/vkviyu/nexus/utils/maputil"
 )
 
-// 默认配置
+// Framework convention (hardcoded, not configurable)
+const (
+	// DefaultEnvKey is the key path for environment config in YAML.
+	// This is a framework convention: environment configs are under "nexus.environment".
+	DefaultEnvKey = "nexus.environment"
+)
+
+// Configurable defaults - can be modified before calling NewNexusCmd
 var (
+	// DefaultConfigFile is the default configuration file name.
+	// Can be changed for projects with multiple executables using different config files.
+	DefaultConfigFile = "nexus.yaml"
+
+	// Default control server settings
 	DefaultCtrlHost    = "127.0.0.1"
 	DefaultCtrlPort    = "8090"
 	DefaultCtrlTimeout = 5 // seconds
-	DefaultConfigFile  = "nexus.yaml"
 )
-
-type GlobalProgramContext struct {
-	GlobalProgram         CmdProgram
-	GlobalProgramStopFunc context.CancelFunc
-	GlobalStopFunc        context.CancelFunc
-	GlobalCleanupDone     chan error
-}
-
-// ProgramConfig 保存业务启动时的各项配置
-type ProgramConfig struct {
-	MySQLDSN string
-	BBoltDB  string
-	Host     string
-	Port     string
-	Mode     string
-}
 
 type NexusCmd struct {
 	cmd *cobra.Command
 }
 
-// setNestedValue 将键 key（用点号分隔）对应的 value 设置到 m 中
-func setNestedValue(m map[string]interface{}, key string, value interface{}) {
-	parts := strings.Split(key, ".")
-	last := len(parts) - 1
-	current := m
-	for i, part := range parts {
-		if i == last {
-			current[part] = value
-		} else {
-			if next, exists := current[part]; exists {
-				if nextMap, ok := next.(map[string]interface{}); ok {
-					current = nextMap
-				} else {
-					nextMap := make(map[string]interface{})
-					current[part] = nextMap
-					current = nextMap
-				}
-			} else {
-				nextMap := make(map[string]interface{})
-				current[part] = nextMap
-				current = nextMap
-			}
-		}
-	}
-}
-
 // NewNexusCmd 创建基于 cobra 的命令行接口，其中包括 start、stop、restart、status 以及 install 子命令
-func NewNexusCmd(program CmdProgram) *NexusCmd {
+// T 为配置类型，框架会自动将 nexus.environment 解析为 T 类型
+func NewNexusCmd[T any](program Program[T]) *NexusCmd {
 	cmd := &cobra.Command{
 		Use:   "nexus",
 		Short: "Nexus server",
@@ -90,15 +61,15 @@ func NewNexusCmd(program CmdProgram) *NexusCmd {
 		viper.BindPFlag("nexus.ctrlport", pflags.Lookup("ctrlport"))
 		viper.BindPFlag("nexus.ctrltimeout", pflags.Lookup("ctrltimeout"))
 
-		configFile := cmd.Flag("config").Value.String()
-		if configFile == "" {
+			configFile := cmd.Flag("config").Value.String()
+			if configFile == "" {
 			fmt.Printf("No configuration file specified; attempting to use default configuration file \"%s\".\n", DefaultConfigFile)
-			configFile = DefaultConfigFile
-			if _, err := os.Stat(configFile); os.IsNotExist(err) {
-				fmt.Printf("Default config file %s not found, program may not work as expected.\n", configFile)
-				configFile = ""
+				configFile = DefaultConfigFile
+				if _, err := os.Stat(configFile); os.IsNotExist(err) {
+					fmt.Printf("Default config file %s not found, program may not work as expected.\n", configFile)
+					configFile = ""
+				}
 			}
-		}
 		if configFile != "" {
 			if _, err := os.Stat(configFile); os.IsNotExist(err) {
 				fmt.Printf("Config file %s not found, program is exiting.\n", configFile)
@@ -119,16 +90,16 @@ func NewNexusCmd(program CmdProgram) *NexusCmd {
 		envItems, _ := cmd.Flags().GetStringArray("env")
 		if len(envItems) > 0 {
 			// 先取原有的 nexus.environment，如果返回 nil 则新建一个 map
-			origEnv := viper.Get("nexus.environment")
-			var origConfig map[string]interface{}
+			origEnv := viper.Get(DefaultEnvKey)
+			var origConfig map[string]any
 			if origEnv == nil {
-				origConfig = make(map[string]interface{})
+				origConfig = make(map[string]any)
 			} else {
 				// 尝试断言为 map
-				if m, ok := origEnv.(map[string]interface{}); ok {
+				if m, ok := origEnv.(map[string]any); ok {
 					origConfig = m
 				} else {
-					origConfig = make(map[string]interface{})
+					origConfig = make(map[string]any)
 				}
 			}
 			// 对每个 -e 参数进行处理，支持多层级键，如 database.mysql=xxx
@@ -141,10 +112,10 @@ func NewNexusCmd(program CmdProgram) *NexusCmd {
 				key := strings.TrimSpace(parts[0])
 				value := strings.TrimSpace(parts[1])
 				// 使用辅助函数支持多层级键（例如 "database.mysql"）
-				setNestedValue(origConfig, key, value)
+				maputil.SetNestedValue(origConfig, key, value)
 			}
 			// 将更新后的 map 写回 viper
-			viper.Set("nexus.environment", origConfig)
+			viper.Set(DefaultEnvKey, origConfig)
 		}
 	}
 
@@ -159,7 +130,16 @@ func NewNexusCmd(program CmdProgram) *NexusCmd {
 			ctrlhost := viper.GetString("nexus.ctrlhost")
 			ctrlport := viper.GetString("nexus.ctrlport")
 			ctrltimeout := viper.GetInt("nexus.ctrltimeout")
-			ncs := newNexusCmdServer(ctrlhost, ctrlport, ctrltimeout, program, viper.GetStringMap("nexus.environment"))
+
+			// 将 nexus.environment 解析为泛型类型 T
+			envMap := viper.GetStringMap(DefaultEnvKey)
+			var env T
+			if err := mapstructure.Decode(envMap, &env); err != nil {
+				fmt.Printf("Error parsing environment config: %v\n", err)
+				os.Exit(1)
+			}
+
+			ncs := newNexusCmdServer(ctrlhost, ctrlport, ctrltimeout, program, env)
 			ncs.start()
 		},
 	}
@@ -209,7 +189,7 @@ func sendControlCommand(command string) error {
 	var err error
 	if command == "restart" {
 		// restart 命令需要发送 JSON 格式的环境变量
-		env := viper.GetStringMap("nexus.environment")
+		env := viper.GetStringMap(DefaultEnvKey)
 		var envData []byte
 		envData, err = json.Marshal(env)
 		if err != nil {

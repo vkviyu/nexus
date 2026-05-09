@@ -1,0 +1,85 @@
+{
+  "$schema": "../contract.schema.json",
+  
+  "name": "CreateClass",
+  "description": "Create a new class in the specified school",
+  
+  "request": {
+    "meta": {
+      "method": "POST",
+      "path": "/classes/{schoolId}",
+      "baseURL": "https://api.example.com"
+    },
+    "example": {
+      "pathParams": {
+        "schoolId": 3
+      },
+      "headers": {
+        "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+      },
+      "query": {
+        "year": 2024,
+        "semester": "spring"
+      },
+      "body": {
+        "className": "高三一班",
+        "teacher": {
+          "name": "张老师",
+          "age": 35,
+          "subjects": ["数学", "物理"]
+        },
+        "students": [
+          {"name": "小明", "score": 95},
+          {"name": "小红", "score": 88}
+        ],
+        "classId": "CLS001"
+      }
+    },
+    "mutable": {
+      "body.teacher.age": [35, null],
+      "body.classId": ["CLS001", null]
+    },
+    "structs": {
+      "CreateClassQuery": "query",
+      "StudentItem": "body.students",
+      "TeacherInfo": "body.teacher",
+      "ClassParams": {
+        "SchoolID": "pathParams.schoolId",
+        "Year": "query.year",
+        "Semester": "query.semester"
+      },
+      "CreateClassBody": "body"
+    },
+    "func": {
+      "params": [
+        {"name": "params", "type": "ClassParams"},
+        {"name": "body", "type": "CreateClassBody"}
+      ]
+    }
+  },
+  
+  "response": {
+    "meta": {
+      "statusCode": 201,
+      "contentType": "application/json"
+    },
+    "example": {
+      "id": 1,
+      "createdAt": "2024-01-01T00:00:00Z",
+      "data": {
+        "success": true,
+        "classInfo": {
+          "id": "CLS001",
+          "studentCount": 2
+        }
+      }
+    },
+    "mutable": {
+      "data": ["@structs.ClassResult", null]
+    },
+    "structs": {
+      "ClassResult": "data",
+      "ClassDetail": "data.classInfo"
+    }
+  }
+}

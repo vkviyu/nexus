@@ -1,0 +1,150 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/vkviyu/nexus/contract.schema.json",
+  "title": "Contract API Description",
+  "description": "A JSON schema for describing API contracts with examples",
+  "type": "object",
+  "required": ["name", "request"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Contract name, used for generated function name",
+      "pattern": "^[A-Z][a-zA-Z0-9]*$"
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of the API"
+    },
+    "request": {
+      "type": "object",
+      "description": "Request specification",
+      "required": ["meta"],
+      "properties": {
+        "meta": {
+          "type": "object",
+          "description": "Request metadata",
+          "required": ["method", "path"],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+              "description": "HTTP method"
+            },
+            "path": {
+              "type": "string",
+              "description": "URL path, supports {param} for path parameters",
+              "pattern": "^/"
+            },
+            "baseURL": {
+              "type": "string",
+              "description": "Base URL for the API",
+              "format": "uri"
+            }
+          }
+        },
+        "example": {
+          "type": "object",
+          "description": "Request example with actual values for type inference",
+          "properties": {
+            "pathParams": {
+              "type": "object",
+              "description": "Path parameters example. Keys must match {param} placeholders in meta.path",
+              "additionalProperties": true
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "query": {
+              "type": "object",
+              "description": "Query parameters example"
+            },
+            "body": {
+              "description": "Request body example (any JSON structure)"
+            }
+          },
+          "additionalProperties": true
+        },
+        "mutable": {
+          "type": "object",
+          "description": "Fields that may have variant types. Array contains example values or @structs.xxx references",
+          "additionalProperties": {
+            "type": "array",
+            "description": "Possible type variants. Use example values for primitives, '@structs.xxx' to reference structs, null for nullable"
+          }
+        },
+        "structs": {
+          "type": "object",
+          "description": "Struct definitions. Value can be: 1) string path for simple mapping (e.g. 'body.teacher'), 2) object for custom field composition. In composition, key can be '@structs.StructName' or '@structs.StructName[FieldName]' to reference other structs",
+          "additionalProperties": {
+            "oneOf": [
+              { "type": "string", "description": "Simple path mapping, inherits all fields from the path" },
+              { "type": "object", "description": "Custom field composition: key is field name or @structs.xxx[FieldName] reference, value is source path or empty for struct refs", "additionalProperties": { "type": "string" } }
+            ]
+          }
+        },
+        "func": {
+          "type": "object",
+          "description": "Function generation configuration",
+          "properties": {
+            "params": {
+              "type": "array",
+              "description": "Function parameters. Each item specifies name and type (must reference structs defined in structs field)",
+              "items": {
+                "type": "object",
+                "required": ["name", "type"],
+                "properties": {
+                  "name": { "type": "string", "description": "Parameter name in generated function" },
+                  "type": { "type": "string", "description": "Type name (must be defined in structs)" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "description": "Response specification",
+      "properties": {
+        "meta": {
+          "type": "object",
+          "description": "Response metadata",
+          "properties": {
+            "statusCode": {
+              "type": "integer",
+              "description": "Expected HTTP status code",
+              "default": 200
+            },
+            "contentType": {
+              "type": "string",
+              "description": "Response Content-Type",
+              "default": "application/json"
+            }
+          }
+        },
+        "example": {
+          "description": "Response body example (any JSON structure)"
+        },
+        "mutable": {
+          "type": "object",
+          "description": "Fields that may have variant types. Array contains example values or @structs.xxx references",
+          "additionalProperties": {
+            "type": "array",
+            "description": "Possible type variants. Use example values for primitives, '@structs.xxx' to reference structs, null for nullable"
+          }
+        },
+        "structs": {
+          "type": "object",
+          "description": "Struct definitions. Value can be: 1) string path for simple mapping (e.g. 'data'), 2) object for custom field composition",
+          "additionalProperties": {
+            "oneOf": [
+              { "type": "string", "description": "Simple path mapping, inherits all fields from the path" },
+              { "type": "object", "description": "Custom field composition: key is field name, value is source path", "additionalProperties": { "type": "string" } }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

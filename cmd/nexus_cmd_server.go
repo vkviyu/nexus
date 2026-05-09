@@ -3,15 +3,15 @@ package cmd
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"time"
 
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/viper"
 )
 
-// CmdProgram 表示业务程序
-type CmdProgram func(stopctx context.Context, env map[string]interface{}, cleanupDone chan error)
+// Program 表示业务程序，T 为配置类型
+type Program[T any] func(stopctx context.Context, env T, cleanupDone chan error)
 
 // programStopContext 保存程序停止相关的上下文和取消方法
 type programStopContext struct {
@@ -33,30 +33,30 @@ type ProgramRestartResponse struct {
 
 // ServerStatusResponse 用于 /control/status 接口
 type ServerStatusResponse struct {
-	Status      string                 `json:"status"`
-	CtrlHost    string                 `json:"ctrlhost"`
-	CtrlPort    string                 `json:"ctrlport"`
-	CtrlTimeout int                    `json:"ctrltimeout"`
-	Config      string                 `json:"config"`
-	Pid         int                    `json:"pid"`
-	Env         map[string]interface{} `json:"environment"`
+	Status      string `json:"status"`
+	CtrlHost    string `json:"ctrlhost"`
+	CtrlPort    string `json:"ctrlport"`
+	CtrlTimeout int    `json:"ctrltimeout"`
+	Config      string `json:"config"`
+	Pid         int    `json:"pid"`
+	Env         any    `json:"environment"`
 }
 
 // nexusCmdServer 中既包含业务程序，也包含 HTTP 控制服务器，用于启动和停止服务
-type nexusCmdServer struct {
+type nexusCmdServer[T any] struct {
 	ctrlhost           string
 	ctrlport           string
 	ctrltimeout        int // in seconds
-	program            CmdProgram
+	program            Program[T]
 	programStopContext programStopContext
-	env                map[string]interface{}
+	env                T
 	cleanupDone        chan error
 }
 
-func newNexusCmdServer(ctrlHost, ctrlPort string, ctrltimeout int, program CmdProgram, env map[string]interface{}) *nexusCmdServer {
+func newNexusCmdServer[T any](ctrlHost, ctrlPort string, ctrltimeout int, program Program[T], env T) *nexusCmdServer[T] {
 	programStopCtx, cancel := context.WithCancel(context.Background())
 	cleanupDone := make(chan error)
-	return &nexusCmdServer{
+	return &nexusCmdServer[T]{
 		ctrlhost:    ctrlHost,
 		ctrlport:    ctrlPort,
 		ctrltimeout: ctrltimeout,
@@ -70,7 +70,7 @@ func newNexusCmdServer(ctrlHost, ctrlPort string, ctrltimeout int, program CmdPr
 	}
 }
 
-func (n *nexusCmdServer) start() {
+func (n *nexusCmdServer[T]) start() {
 	// 启动业务程序
 	go n.program(n.programStopContext.stopctx, n.env, n.cleanupDone)
 	mux := http.NewServeMux()
@@ -112,8 +112,8 @@ func (n *nexusCmdServer) start() {
 
 	// /control/restart 接口仅用于重启业务程序，不重启控制服务器
 	mux.HandleFunc("/control/restart", func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
+		var envMap map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&envMap); err != nil {
 			resp := ProgramRestartResponse{
 				Success: false,
 				Error:   err.Error(),
@@ -123,30 +123,26 @@ func (n *nexusCmdServer) start() {
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
-		env := make(map[string]interface{})
-		err = json.Unmarshal(body, &env)
-		if err != nil {
+
+		// 解码为泛型类型 T
+		var newEnv T
+		if err := mapstructure.Decode(envMap, &newEnv); err != nil {
 			resp := ProgramRestartResponse{
 				Success: false,
-				Error:   err.Error(),
+				Error:   "config decode error: " + err.Error(),
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
-		// 将未传入的新环境变量补充上原始值
-		for k, v := range n.env {
-			if _, exists := env[k]; !exists {
-				env[k] = v
-			}
-		}
+
 		n.programStopContext.cancel()
 		select {
 		case <-n.cleanupDone:
 			// 重置上下文和程序状态，重启业务程序
 			n.programStopContext.stopctx, n.programStopContext.cancel = context.WithCancel(context.Background())
-			n.env = env
+			n.env = newEnv
 			go n.program(n.programStopContext.stopctx, n.env, n.cleanupDone)
 			resp := ProgramRestartResponse{Success: true}
 			w.Header().Set("Content-Type", "application/json")
