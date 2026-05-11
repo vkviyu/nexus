@@ -292,7 +292,7 @@ Contract JSON 格式示例：
 
 ### Contract 模式
 
-使用 `Contract[T]` 定义 API 请求，通过 `Do[T]` 执行并获得类型安全的响应：
+使用 `Contract[T]` 定义 API 请求，通过 `Do` 执行并获得类型安全的响应：
 
 ```go
 import "github.com/vkviyu/nexus/transport/client"
@@ -311,8 +311,8 @@ contract := &client.Contract[User]{
 
 // 执行请求
 httpClient := client.NewHTTPClient()
-user, err := client.Do[User](ctx, httpClient, contract)
-// user 的类型为 *User
+user, err := client.Do(ctx, httpClient, contract)
+// user 的类型为 *User（从 contract 自动推导，无需显式指定泛型参数）
 ```
 
 ### NewRawContract
